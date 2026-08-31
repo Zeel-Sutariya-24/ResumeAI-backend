@@ -1,102 +1,271 @@
 import express from "express";
 import { atsCheck } from "../controllers/atsController.js";
 import { extractTextRoute } from "../controllers/extractRouteController.js";
-import { GoogleGenerativeAI } from "@google/generative-ai";
-import { extractStrictJson, normalizeFlags } from "../utils/strictJson.js";
+import { GoogleGenAI, Type } from "@google/genai";
+import { normalizeFlags } from "../utils/strictJson.js";
 
 const router = express.Router();
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
 
+const GEMINI_MODEL =
+  process.env.GEMINI_MODEL || "gemini-2.5-flash";
+
+// ATS check route
 router.post("/ats-check", atsCheck);
 
-// THIS is the correct route for file uploads
+// Resume file extraction route
 router.post("/extract-text", extractTextRoute);
 
-
+// Red flags route
 router.post("/red-flags", async (req, res) => {
   try {
     const { resumeText, jobDescription } = req.body;
 
-    if (!resumeText || String(resumeText).trim().length < 50) {
+    // Validate resume text
+    if (
+      !resumeText ||
+      String(resumeText).trim().length < 50
+    ) {
       return res.status(400).json({
         success: false,
-        error: "resumeText is required"
+        error: "resumeText is required",
       });
     }
 
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
+    // Validate API key
+    if (!process.env.GEMINI_API_KEY) {
+      console.error("GEMINI_API_KEY is missing.");
 
+      return res.status(500).json({
+        success: false,
+        error: "GEMINI_API_KEY is not configured.",
+      });
+    }
+
+    // Initialize Gemini
+    const ai = new GoogleGenAI({
+      apiKey: process.env.GEMINI_API_KEY,
+    });
 
     const prompt = `
 You are a senior recruiter and resume reviewer.
 
-Analyze the RESUME TEXT (and optional JOB DESCRIPTION) and identify recruiter red flags.
-Do NOT be generic. Only include issues that could realistically hurt callback chances.
-If no meaningful red flags exist, return an empty flags array.
+Analyze the RESUME TEXT and optional JOB DESCRIPTION.
 
-Return STRICT JSON only with this schema:
+Identify recruiter red flags that could realistically hurt the candidate's callback chances.
 
-{
-  "flags": [
-    {
-      "type": "buzzwords|metrics|verbs|dates|phrases|format|clarity|other",
-      "severity": "low|medium|high",
-      "message": "Short recruiter-style red flag",
-      "example": "A short quote from the resume that demonstrates the issue (optional)",
-      "whyItMatters": "Why recruiters care (1 sentence)",
-      "fix": "Specific fix suggestion (1 sentence)"
-    }
-  ]
+Do NOT be generic.
+
+Only identify meaningful issues that are actually supported by the resume.
+
+Do NOT invent facts.
+
+If there are no meaningful red flags, return an empty flags array.
+
+RED FLAG CATEGORIES:
+
+type must be one of:
+
+buzzwords
+metrics
+verbs
+dates
+phrases
+format
+clarity
+other
+
+SEVERITY:
+
+Use:
+low
+medium
+high
+
+RULES:
+
+1. Return a maximum of 8 flags.
+
+2. Each flag must be specific and actionable.
+
+3. "message" must be a short recruiter-style explanation of the problem.
+
+4. "example" should contain a short quote from the resume demonstrating the issue when possible.
+
+5. "example" must be no longer than 120 characters.
+
+6. Do not invent resume content.
+
+7. "whyItMatters" must explain in one sentence why the issue matters to recruiters.
+
+8. "fix" must provide one specific improvement in one sentence.
+
+9. Focus on issues that could realistically reduce callback chances.
+
+10. Avoid generic advice such as "make your resume better."
+
+11. If a potential issue is not clearly supported by the resume, do not include it.
+
+JOB DESCRIPTION:
+
+${
+  jobDescription
+    ? jobDescription
+    : "(none provided)"
 }
 
-Rules:
-- max 8 flags
-- examples must be short (<= 120 chars)
-- don't invent facts not present in the resume
-- prefer actionable, recruiter-realistic advice
-- output JSON ONLY (no markdown)
-
-JOB DESCRIPTION (optional):
-${jobDescription ? jobDescription : "(none)"}
-
 RESUME TEXT:
+
 ${resumeText}
 `;
 
-    const result = await model.generateContent(prompt);
-    const raw = result?.response?.text?.() || "";
+    // Generate structured JSON response
+    const result = await ai.models.generateContent({
+      model: GEMINI_MODEL,
 
-    const parsed = extractStrictJson(raw);
-    console.log("🧠 RAW GEMINI OUTPUT:\n", raw);
+      contents: prompt,
 
-    // ✅ FAIL-SAFE: Gemini sometimes returns garbage
-    if (!parsed || !Array.isArray(parsed.flags)) {
-    console.warn("⚠️ Gemini returned invalid JSON. Returning empty flags.");
-    return res.json({
-        success: true,
-        flags: []
+      config: {
+        responseMimeType: "application/json",
+
+        responseSchema: {
+          type: Type.OBJECT,
+
+          properties: {
+            flags: {
+              type: Type.ARRAY,
+
+              items: {
+                type: Type.OBJECT,
+
+                properties: {
+                  type: {
+                    type: Type.STRING,
+                    enum: [
+                      "buzzwords",
+                      "metrics",
+                      "verbs",
+                      "dates",
+                      "phrases",
+                      "format",
+                      "clarity",
+                      "other",
+                    ],
+                  },
+
+                  severity: {
+                    type: Type.STRING,
+                    enum: [
+                      "low",
+                      "medium",
+                      "high",
+                    ],
+                  },
+
+                  message: {
+                    type: Type.STRING,
+                  },
+
+                  example: {
+                    type: Type.STRING,
+                  },
+
+                  whyItMatters: {
+                    type: Type.STRING,
+                  },
+
+                  fix: {
+                    type: Type.STRING,
+                  },
+                },
+
+                required: [
+                  "type",
+                  "severity",
+                  "message",
+                  "example",
+                  "whyItMatters",
+                  "fix",
+                ],
+
+                additionalProperties: false,
+              },
+            },
+          },
+
+          required: ["flags"],
+
+          additionalProperties: false,
+        },
+
+        temperature: 0.2,
+
+        maxOutputTokens: 3000,
+      },
     });
+
+    const raw = result?.text || "";
+
+    console.log(
+      "🧠 GEMINI RED FLAGS OUTPUT:\n",
+      raw
+    );
+
+    // Parse structured JSON
+    let parsed;
+
+    try {
+      parsed = JSON.parse(raw);
+    } catch (jsonErr) {
+      console.error(
+        "⚠️ RED FLAGS JSON PARSE ERROR:",
+        jsonErr
+      );
+
+      console.error(
+        "RAW GEMINI RESPONSE:",
+        raw
+      );
+
+      return res.json({
+        success: true,
+        flags: [],
+      });
     }
 
+    // Fail-safe
+    if (
+      !parsed ||
+      !Array.isArray(parsed.flags)
+    ) {
+      console.warn(
+        "⚠️ Gemini returned invalid red flags."
+      );
+
+      return res.json({
+        success: true,
+        flags: [],
+      });
+    }
+
+    // Normalize flags using your existing utility
     const flags = normalizeFlags(parsed.flags);
 
     return res.json({
-    success: true,
-    flags
+      success: true,
+      flags,
     });
-
   } catch (err) {
-    console.error("❌ Red flags generation failed:", err.message);
+    console.error(
+      "❌ Red flags generation failed:",
+      err
+    );
 
-    // Never break UX — return empty flags instead
+    // Never break the frontend UX
     return res.json({
-        success: true,
-        flags: []
+      success: true,
+      flags: [],
     });
-}
-
+  }
 });
-
 
 export default router;
