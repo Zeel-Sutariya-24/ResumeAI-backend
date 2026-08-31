@@ -1,68 +1,101 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenAI, Type } from "@google/genai";
 
 export const atsCheck = async (req, res) => {
   try {
     const { resumeText, jobDescription } = req.body;
 
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+    // Validate input
+    if (!resumeText || !jobDescription) {
+      return res.status(400).json({
+        error: "resumeText and jobDescription are required.",
+      });
+    }
 
-    const model = genAI.getGenerativeModel({
-      model: "gemini-2.0-flash"
+    // Validate API key
+    if (!process.env.GEMINI_API_KEY) {
+      console.error("GEMINI_API_KEY is missing.");
+
+      return res.status(500).json({
+        error: "GEMINI_API_KEY is not configured.",
+      });
+    }
+
+    // Initialize Gemini
+    const ai = new GoogleGenAI({
+      apiKey: process.env.GEMINI_API_KEY,
     });
 
     const prompt = `
-You MUST return exactly and only a valid JSON object.
-NO markdown formatting.
-NO explanation.
-NO commentary.
-NO text outside of JSON.
+You are an expert ATS resume evaluator and a strict HR recruiter.
 
-Your output MUST follow THIS EXACT SCHEMA:
+Analyze the candidate's resume against the provided job description.
 
-{
-  "score": 0,
-  "matchedSkills": [],
-  "missingKeywords": [],
-  "recommendations": [
-    "Paragraph 1 ...",
-    "Paragraph 2 ...",
-    "Paragraph 3 ...",
-    "Paragraph 4 ...",
-    "Paragraph 5 ..."
-  ],
-  "HrFinalVerdict": ""
-}
+Your job is to determine how well the resume matches the job.
 
-STRICT RULES:
-1. All 5 fields MUST be present.
-2. "score" MUST be a number (0–100).
-3. "matchedSkills" MUST be an array of strings.
-4. "missingKeywords" MUST be an array of strings.
+EVALUATION CRITERIA:
 
-5. recommendations MUST:
-   - Be returned as an ARRAY of paragraphs.
-   - Each paragraph should be 2–4 sentences. Include an example that can be added.
-   - There MUST be 3–6 total paragraphs.
-   - NO bullet points, NO markdown, NO symbols like *, -, •.
-   - Each paragraph should focus on ONE improvement area only:
-       1) Missing skills
-       2) Resume restructuring
-       3) Achievements & metrics
-       4) Keyword optimization
-       5) Certifications & training
-       6) Score improvement strategy (how to reach 90+ ATS) is MUST.
+1. Skills match
+2. Relevant experience
+3. Job-specific keywords
+4. Resume structure
+5. Achievements and measurable results
+6. Certifications and training
+7. Overall ATS compatibility
 
-6. "HrFinalVerdict" MUST:
-    - Start with EXACTLY one of the following:
-      "DECISION: SHORTLIST"
-      "DECISION: REJECT"
-    - Sound like a harsh, STRICT, no-nonsense HR manager.
-    - Then 3–5 sentences explaining why.
-    - MUST NOT mention the opposite decision.
-    - MUST NOT contain both 'shortlist' and 'reject'.
+SCORING RULES:
 
-7. NO additional fields allowed.
-8. If unsure, make your best judgment but still fill all fields.
+Give an ATS compatibility score from 0 to 100.
+
+Do NOT inflate the score.
+
+A score of 90 or higher should only be given when the resume has very strong alignment with the job description, including relevant skills, experience, keywords, achievements, and qualifications.
+
+MATCHED SKILLS:
+
+Only include skills that are actually present in the resume and relevant to the job description.
+
+MISSING KEYWORDS:
+
+Include important skills, technologies, qualifications, responsibilities, tools, methodologies, or keywords from the job description that are missing from the resume.
+
+RECOMMENDATIONS:
+
+Return between 3 and 6 recommendation paragraphs.
+
+Each paragraph must contain 2 to 4 sentences.
+
+Each paragraph must focus on ONE improvement area.
+
+Possible improvement areas:
+
+Missing skills
+Resume restructuring
+Achievements and metrics
+Keyword optimization
+Certifications and training
+Score improvement strategy
+
+Every recommendation must include a concrete example of something the candidate could add or change.
+
+Do not use bullet points, markdown, symbols, or numbered lists inside the recommendation paragraphs.
+
+HR FINAL VERDICT:
+
+Act like a harsh, strict, no-nonsense HR manager.
+
+The verdict MUST begin with exactly one of these:
+
+DECISION: SHORTLIST
+
+OR
+
+DECISION: REJECT
+
+After the decision, write 3 to 5 sentences explaining the decision.
+
+Do not mention the opposite decision.
+
+Do not use both "SHORTLIST" and "REJECT" in the same verdict.
 
 RESUME:
 ${resumeText}
@@ -71,45 +104,162 @@ JOB DESCRIPTION:
 ${jobDescription}
 `;
 
-    const result = await model.generateContent(prompt);
-    const text = result.response.text();
+    // Generate structured JSON response
+    const result = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+
+      contents: prompt,
+
+      config: {
+        responseMimeType: "application/json",
+
+        responseSchema: {
+          type: Type.OBJECT,
+
+          properties: {
+            score: {
+              type: Type.NUMBER,
+              description:
+                "ATS compatibility score from 0 to 100.",
+            },
+
+            matchedSkills: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.STRING,
+              },
+              description:
+                "Skills present in the resume that match the job description.",
+            },
+
+            missingKeywords: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.STRING,
+              },
+              description:
+                "Important job-related keywords, skills, tools, qualifications, or concepts missing from the resume.",
+            },
+
+            recommendations: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.STRING,
+              },
+              description:
+                "Three to six recommendation paragraphs. Each paragraph should contain 2 to 4 sentences and a concrete example.",
+            },
+
+            HrFinalVerdict: {
+              type: Type.STRING,
+              description:
+                "Strict HR verdict beginning with exactly DECISION: SHORTLIST or DECISION: REJECT.",
+            },
+          },
+
+          required: [
+            "score",
+            "matchedSkills",
+            "missingKeywords",
+            "recommendations",
+            "HrFinalVerdict",
+          ],
+
+          additionalProperties: false,
+        },
+
+        temperature: 0.2,
+
+        maxOutputTokens: 4000,
+      },
+    });
+
+    const text = result.text;
 
     console.log("RAW GEMINI RESPONSE:", text);
 
-    // Strip accidental markdown formatting
-    const clean = text.replace(/```json|```/g, "").trim();
+    // Parse JSON
+    let parsed;
 
-    let parsed = {};
     try {
-      parsed = JSON.parse(clean);
+      parsed = JSON.parse(text);
     } catch (jsonErr) {
       console.error("JSON PARSE ERROR:", jsonErr);
+      console.error("RAW RESPONSE:", text);
+
       return res.status(500).json({
-        error: "Model returned invalid JSON.",
-        raw: clean
+        error: "Gemini returned invalid JSON.",
+        raw: text,
       });
     }
 
-    // Apply safe fallbacks
-    parsed.score = parsed.score || 0;
-    parsed.matchedSkills = parsed.matchedSkills || [];
-    parsed.missingKeywords = parsed.missingKeywords || [];
+    // -----------------------------
+    // SAFETY VALIDATION
+    // -----------------------------
 
-    parsed.recommendations = Array.isArray(parsed.recommendations)
-      ? parsed.recommendations
-      : ["No recommendations provided."];
+    // Score
+    const score = Number(parsed.score);
 
-    parsed.HrFinalVerdict =
-      parsed.HrFinalVerdict || "DECISION: REJECT. Model failed to provide a verdict.";
+    parsed.score = Number.isFinite(score)
+      ? Math.min(100, Math.max(0, score))
+      : 0;
 
-    // Attach original text
+    // Matched skills
+    parsed.matchedSkills = Array.isArray(parsed.matchedSkills)
+      ? parsed.matchedSkills.filter(
+          (skill) => typeof skill === "string"
+        )
+      : [];
+
+    // Missing keywords
+    parsed.missingKeywords = Array.isArray(
+      parsed.missingKeywords
+    )
+      ? parsed.missingKeywords.filter(
+          (keyword) => typeof keyword === "string"
+        )
+      : [];
+
+    // Recommendations
+    parsed.recommendations = Array.isArray(
+      parsed.recommendations
+    )
+      ? parsed.recommendations.filter(
+          (recommendation) =>
+            typeof recommendation === "string"
+        )
+      : [];
+
+    // HR verdict
+    if (
+      typeof parsed.HrFinalVerdict !== "string" ||
+      !parsed.HrFinalVerdict.trim()
+    ) {
+      parsed.HrFinalVerdict =
+        "DECISION: REJECT. No valid HR verdict was provided.";
+    }
+
+    // -----------------------------
+    // ATTACH ORIGINAL INPUT
+    // -----------------------------
+
     parsed.resumeText = resumeText;
     parsed.jobDescription = jobDescription;
 
-    res.json(parsed);
+    // -----------------------------
+    // RETURN RESPONSE
+    // -----------------------------
 
+    return res.json(parsed);
   } catch (err) {
     console.error("ATS ERROR:", err);
-    res.status(500).json({ error: "ATS internal server error." });
+
+    return res.status(500).json({
+      error: "ATS internal server error.",
+      details:
+        process.env.NODE_ENV === "development"
+          ? err.message
+          : undefined,
+    });
   }
 };
